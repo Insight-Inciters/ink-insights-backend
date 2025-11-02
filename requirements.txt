@@ -1,2 +1,6 @@
 fastapi
 uvicorn
+textblob
+rake-nltk
+nltk
+textstat
