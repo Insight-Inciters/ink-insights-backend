@@ -322,3 +322,8 @@ async def analyze_text(req: TextRequest):
         "summary": summary,
         "themes": {"points": themes},
     }
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run("upload:app", host="0.0.0.0", port=8000)
+
