@@ -11,6 +11,8 @@ import nltk
 import numpy as np
 import re
 
+
+
 # ======= NLTK setup =======
 nltk.download("punkt", quiet=True)
 nltk.download("stopwords", quiet=True)
@@ -23,8 +25,6 @@ app = FastAPI()
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
-        "http://127.0.0.1:5500",
-        "http://localhost:5500",
         "https://inkinsights.vercel.app",
     ],
     allow_credentials=True,
@@ -323,3 +323,7 @@ async def analyze_text(req: TextRequest):
         "summary": summary,
         "themes": {"points": themes},
     }
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run("upload:app", host="0.0.0.0", port=8000)
