@@ -1,229 +1,325 @@
-from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse
+# upload.py
+from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from typing import Dict, Any
-import re
-import math
-from collections import Counter
-
-
-# ===== NLP deps =====
-import nltk
-from nltk.corpus import stopwords
-from nltk.tokenize import sent_tokenize
-from nltk.sentiment import SentimentIntensityAnalyzer
-from rake_nltk import Rake
 from textblob import TextBlob
-import textstat
+from nltk.corpus import stopwords, wordnet as wn
+from nltk.tokenize import word_tokenize, sent_tokenize
+from nltk.stem import WordNetLemmatizer
+from collections import Counter
+import nltk
+import numpy as np
+import re
 
-# ---- NLTK lazy bootstrap (safe for Vercel) ----
-NLTK_DATA_DIR = "/tmp/nltk_data"
-if NLTK_DATA_DIR not in nltk.data.path:
-    nltk.data.path.append(NLTK_DATA_DIR)
+# ======= NLTK setup =======
+nltk.download("punkt", quiet=True)
+nltk.download("stopwords", quiet=True)
+nltk.download("wordnet", quiet=True)
+nltk.download("omw-1.4", quiet=True)
 
-def _ensure_nltk():
-    try:
-        stopwords.words("english")
-    except LookupError:
-        nltk.download("stopwords", download_dir=NLTK_DATA_DIR)
-    try:
-        sent_tokenize("test")
-    except LookupError:
-        nltk.download("punkt", download_dir=NLTK_DATA_DIR)
-    try:
-        SentimentIntensityAnalyzer()
-    except Exception:
-        nltk.download("vader_lexicon", download_dir=NLTK_DATA_DIR)
+# ======= FastAPI setup =======
+app = FastAPI()
 
-_ensure_nltk()
-
-# ===== FastAPI setup =====
-app = FastAPI(title="Ink Insights API")
-
-# CORS: allow your frontend domain only
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["https://inkinsights.vercel.app"],
+    allow_origins=[
+        "http://127.0.0.1:5500",
+        "http://localhost:5500",
+        "https://inkinsights.vercel.app",
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# ===== Data model =====
-class AnalyzeIn(BaseModel):
+# ======= Schema =======
+class TextRequest(BaseModel):
     text: str
-    filename: str = "unknown.txt"
+    filename: str = "document.txt"
 
-# ===== Helper functions =====
-def _normalize_ws(text: str) -> str:
-    return re.sub(r"\s+", " ", text).strip()
 
-def _count_words(text: str) -> int:
-    tokens = re.findall(r"\b[\w’'-]+\b", text, flags=re.UNICODE)
-    return len(tokens)
+# ======= Core helpers =======
 
-def _read_time_minutes(words: int, wpm: int = 200) -> int:
-    return max(1, math.ceil(words / max(1, wpm)))
+def clean_text(text: str) -> str:
+    text = re.sub(r"http\S+", "", text)
+    text = re.sub(r"[^A-Za-z0-9\s,.!?']", " ", text)
+    text = re.sub(r"\s+", " ", text)
+    return text.strip()
 
-def _keyword_stats(text: str, top_n: int = 20) -> Dict[str, Any]:
-    rake = Rake(min_length=1, max_length=3)
-    rake.extract_keywords_from_text(text)
-    ranked_phrases = rake.get_ranked_phrases()[:top_n]
 
-    sw = set(stopwords.words("english"))
-    tokens = [t.lower() for t in re.findall(r"\b[\w’'-]+\b", text)]
-    tokens = [t for t in tokens if t not in sw and not re.fullmatch(r"[-’']+", t)]
-    freqs = Counter(tokens)
-
-    top_items = freqs.most_common(top_n)
-    unique = len(set(tokens))
-    top_word = top_items[0][0] if top_items else None
-
-    bigrams = Counter(zip(tokens, tokens[1:])).most_common(10)
-    trigrams = Counter(zip(tokens, tokens[1:], tokens[2:])).most_common(10)
-
+def analyze_sentiment(text: str):
+    blob = TextBlob(text)
+    polarity = blob.sentiment.polarity
+    subjectivity = blob.sentiment.subjectivity
+    mood = "positive" if polarity > 0.1 else "negative" if polarity < -0.1 else "neutral"
     return {
-        "unique": unique,
-        "top": top_word,
-        "list": [{"token": k, "count": v} for k, v in top_items],
-        "ngrams": {
-            "bigrams": [{"token": " ".join(k), "count": v} for k, v in bigrams],
-            "trigrams": [{"token": " ".join(k), "count": v} for k, v in trigrams],
-        },
+        "polarity": round(polarity, 3),
+        "subjectivity": round(subjectivity, 3),
+        "mood": mood,
     }
 
-def _sentiment_block(text: str) -> Dict[str, Any]:
-    sia = SentimentIntensityAnalyzer()
-    sentences = sent_tokenize(text) or [text]
-    timeline = []
-    pos = neu = neg = 0
 
-    for i, s in enumerate(sentences):
-        scores = sia.polarity_scores(s)
-        timeline.append({"i": i, "compound": scores["compound"]})
-        buckets = {k: scores[k] for k in ("pos", "neu", "neg")}
-        b = max(buckets, key=buckets.get)
-        if b == "pos":
-            pos += 1
-        elif b == "neu":
-            neu += 1
-        else:
-            neg += 1
+def count_syllables(word):
+    word = word.lower()
+    vowels = "aeiouy"
+    count = 0
+    prev = False
+    for ch in word:
+        if ch in vowels and not prev:
+            count += 1
+        prev = ch in vowels
+    if word.endswith("e"):
+        count = max(1, count - 1)
+    return max(count, 1)
 
-    total = max(1, len(sentences))
-    pos_pct = round(pos * 100 / total)
-    neu_pct = round(neu * 100 / total)
-    neg_pct = 100 - pos_pct - neu_pct
 
-    return {
-        "pos": pos_pct,
-        "neu": neu_pct,
-        "neg": neg_pct,
-        "timeline": timeline,
-    }
-
-def _readability(text: str) -> Dict[str, Any]:
-    try:
-        score = float(textstat.flesch_reading_ease(text))
-    except Exception:
-        score = 0.0
-    level = (
-        "Very Easy" if score >= 90 else
-        "Easy" if score >= 80 else
-        "Fairly Easy" if score >= 70 else
-        "Good" if score >= 60 else
-        "Fairly Difficult" if score >= 50 else
-        "Difficult" if score >= 30 else
-        "Very Confusing"
-    )
-    return {"score": round(score, 1), "level": level}
-
-def _summary(text: str, max_sents: int = 3) -> str:
+def calc_readability(text: str):
     sentences = sent_tokenize(text)
-    if not sentences:
-        return ""
-    scored = sorted(
-        ((abs(TextBlob(s).sentiment.polarity), i, s) for i, s in enumerate(sentences)),
-        reverse=True,
-    )
-    picked = sorted(scored[:max_sents], key=lambda x: x[1])
-    return " ".join(s for _, _, s in picked)
+    words = word_tokenize(text)
+    num_sent = len(sentences)
+    num_words = len(words)
+    num_syllables = sum(count_syllables(w) for w in words)
+    if num_sent == 0 or num_words == 0:
+        return 0.0
+    score = 206.835 - 1.015 * (num_words / num_sent) - 84.6 * (num_syllables / num_words)
+    return max(min(score, 100), 0)
 
-def _emotion_stub(text: str) -> Dict[str, Any]:
-    seeds = {
-        "joy": {"joy", "happy", "delight", "smile", "pleasure", "love", "cheer"},
-        "anger": {"anger", "angry", "rage", "furious", "irritate", "annoy"},
-        "sadness": {"sad", "sorrow", "grief", "cry", "tears", "lonely"},
-        "fear": {"fear", "scared", "afraid", "terror", "panic", "worry"},
-        "surprise": {"surprise", "astonish", "amaze", "sudden", "shock"},
+
+def extract_keywords(text: str, top_n=10):
+    words = word_tokenize(text.lower())
+    stop_words = set(stopwords.words("english"))
+    words = [w for w in words if w.isalpha() and w not in stop_words]
+    freq = Counter(words).most_common(top_n)
+    return [{"token": w, "count": c} for w, c in freq]
+
+
+def emotion_scores(text: str):
+    emotion_lex = {
+        "joy": ["happy", "joy", "delight", "love", "pleasure", "excited"],
+        "anger": ["angry", "mad", "furious", "rage", "irritated"],
+        "sadness": ["sad", "down", "depressed", "cry", "lonely"],
+        "fear": ["fear", "scared", "terrified", "afraid", "nervous"],
+        "surprise": ["surprised", "shocked", "amazed", "astonished"],
     }
-    counts = {k: 0 for k in seeds}
-    toks = [t.lower() for t in re.findall(r"\b[\w’'-]+\b", text)]
-    for t in toks:
-        for emo, lex in seeds.items():
-            if t in lex:
-                counts[emo] += 1
-    total = sum(counts.values()) or 1
-    breakdown = {k: round(v * 100 / total) for k, v in counts.items()}
-    dominant = max(counts, key=counts.get) if total > 1 else "neutral"
+    tokens = [w.lower() for w in word_tokenize(text)]
+    emo_counts = {k: 0 for k in emotion_lex}
+    total = len(tokens)
+    for emo, words in emotion_lex.items():
+        emo_counts[emo] = sum(tokens.count(w) for w in words)
+    if total > 0:
+        emo_counts = {k: round(v / total, 3) for k, v in emo_counts.items()}
+    return {"breakdown": emo_counts}
 
-    sia = SentimentIntensityAnalyzer()
-    sents = sent_tokenize(text) or [text]
-    arc = []
-    window = 5
-    vals = [sia.polarity_scores(s)["compound"] for s in sents]
-    for i in range(len(vals)):
-        lo = max(0, i - window + 1)
-        avg = sum(vals[lo:i+1]) / (i - lo + 1)
-        arc.append({"i": i, "value": round(avg, 3)})
 
-    return {"dominant": dominant, "breakdown": breakdown, "arc": arc}
+def generate_summary(text: str):
+    sentences = sent_tokenize(text)
+    if len(sentences) <= 3:
+        return " ".join(sentences)
+    blob = TextBlob(text)
+    ranked = sorted(sentences, key=lambda s: abs(TextBlob(s).sentiment.polarity), reverse=True)
+    summary = " ".join(ranked[:3])
+    return summary.strip()
 
-def _themes_stub(keywords: Dict[str, Any]) -> Dict[str, Any]:
-    phrases = keywords.get("list", [])
-    top_terms = [x["token"] for x in phrases[:6]]
-    clusters = max(1, math.ceil(len(phrases) / 5))
-    return {"clusters": clusters, "top_theme": top_terms or ["—"]}
 
-# ===== Routes =====
+# ======= Semantic clustering helpers =======
+_LEMM = WordNetLemmatizer()
+
+def _normalize_token(t: str) -> str:
+    t = re.sub(r"[^a-zA-Z']", "", t.lower())
+    if not t:
+        return t
+    lemmas = [
+        _LEMM.lemmatize(t, "n"),
+        _LEMM.lemmatize(t, "v"),
+        _LEMM.lemmatize(t, "a"),
+        _LEMM.lemmatize(t, "r"),
+    ]
+    return min(lemmas, key=len)
+
+
+def _wordnet_similarity(a: str, b: str) -> float:
+    if a == b or not a or not b:
+        return 1.0 if a == b and a else 0.0
+    syn_a = wn.synsets(a)
+    syn_b = wn.synsets(b)
+    best = 0.0
+    for sa in syn_a:
+        for sb in syn_b:
+            sim = sa.wup_similarity(sb)
+            if sim and sim > best:
+                best = sim
+    return float(best or 0.0)
+
+
+def _char_bigrams(s: str) -> set:
+    return {s[i:i+2] for i in range(len(s)-1)} if len(s) > 1 else {s}
+
+
+def _jaccard_chars(a: str, b: str) -> float:
+    A, B = _char_bigrams(a), _char_bigrams(b)
+    if not A and not B:
+        return 0.0
+    return len(A & B) / max(1, len(A | B))
+
+
+def _semantic_similarity(a: str, b: str) -> float:
+    wn_sim = _wordnet_similarity(a, b)
+    if wn_sim >= 0.2:
+        return wn_sim
+    return max(wn_sim, _jaccard_chars(a, b))
+
+
+def _classical_mds(D: np.ndarray, dim: int = 2) -> np.ndarray:
+    """Perform classical multidimensional scaling (MDS)."""
+    n = D.shape[0]
+    if n == 0:
+        return np.zeros((0, dim))
+
+    # Centering matrix
+    J = np.eye(n) - np.ones((n, n)) / n
+    # Double-centering formula
+    B = -0.5 * J @ (D ** 2) @ J
+
+    # Eigen decomposition
+    vals, vecs = np.linalg.eigh(B)
+    idx = np.argsort(vals)[::-1]
+    vals = vals[idx]
+    vecs = vecs[:, idx]
+
+    # Keep only positive eigenvalues
+    pos_mask = vals > 1e-9
+    vals = vals[pos_mask][:dim]
+    vecs = vecs[:, pos_mask][:, :dim]
+
+    if len(vals) == 0:
+        return np.zeros((n, dim))
+
+    # Force vals to be 1D numeric array
+    vals = np.array(vals, dtype=float).flatten()
+
+    # Scale coordinates
+    try:
+        X = vecs[:, :len(vals)] @ np.diag(np.sqrt(vals))
+    except Exception:
+        # In case of mismatched shapes
+        X = np.zeros((n, dim))
+
+    # Pad to ensure 2D (x,y)
+    if X.ndim == 1:
+        X = X.reshape(-1, 1)
+    if X.shape[1] < dim:
+        X = np.pad(X, ((0, 0), (0, dim - X.shape[1])), mode="constant")
+
+    return np.nan_to_num(X)
+
+def _greedy_clusters(points: np.ndarray, threshold: float = 0.3):
+    """
+    Simple greedy clustering of embedding vectors based on cosine similarity.
+    Returns a list of cluster labels (integers).
+    """
+    import numpy as np
+    from sklearn.metrics.pairwise import cosine_similarity
+
+    if points is None or len(points) == 0:
+        return []
+
+    sim = cosine_similarity(points)
+    n = len(points)
+    assigned = np.zeros(n, dtype=bool)
+    clusters = [-1] * n
+    cid = 0
+
+    for i in range(n):
+        if assigned[i]:
+            continue
+        clusters[i] = cid
+        assigned[i] = True
+        # Assign all points that are sufficiently similar
+        for j in range(i + 1, n):
+            if not assigned[j] and sim[i, j] >= 1 - threshold:
+                clusters[j] = cid
+                assigned[j] = True
+        cid += 1
+
+    # Safety: ensure list, not scalar
+    if isinstance(clusters, int):
+        clusters = [clusters]
+    return clusters
+
+
+
+def find_themes(keywords, max_points=60):
+    kw = keywords[:max_points]
+    if not kw:
+        return []
+
+    tokens = [_normalize_token(k["token"]) for k in kw]
+    counts = [int(k["count"]) for k in kw]
+    labels = [k["token"] for k in kw]
+
+    n = len(tokens)
+    S = np.zeros((n, n), dtype=float)
+    for i in range(n):
+        S[i, i] = 1.0
+        for j in range(i + 1, n):
+            sim = _semantic_similarity(tokens[i], tokens[j])
+            S[i, j] = S[j, i] = sim
+
+    D = 1.0 - np.clip(S, 0.0, 1.0)
+    X = _classical_mds(D, dim=2)
+    X = np.nan_to_num(X)
+
+    clusters = _greedy_clusters(S, threshold=0.48)
+    idx_to_cluster = {i: c for i, c in enumerate(clusters)}
+
+
+    xs, ys = X[:, 0], X[:, 1]
+    def _norm(arr):
+        a, b = float(np.min(arr)), float(np.max(arr))
+        return (arr - a) / (b - a + 1e-9)
+    xs_n, ys_n = _norm(xs), _norm(ys)
+
+    points = []
+    for i in range(n):
+        points.append({
+            "x": round(float(xs_n[i]), 4),
+            "y": round(float(ys_n[i]), 4),
+            "label": labels[i],
+            "cluster": int(idx_to_cluster.get(i, 0)),
+            "count": counts[i],
+        })
+    return points
+
+
+# ======= Routes =======
 @app.get("/")
 async def home():
     return {"message": "Ink Insights backend is working!"}
 
-@app.post("/")  # main analyze endpoint
-async def analyze(req: AnalyzeIn):
-    text = _normalize_ws(req.text or "")
-    words = _count_words(text)
 
-    if words == 0:
-        return JSONResponse({"error": "Empty text"}, status_code=400)
-    if words > 5000:
-        return JSONResponse({"error": "Word limit exceeded (max 5000)"}, status_code=400)
+@app.post("/analyze")
+async def analyze_text(req: TextRequest):
+    text = clean_text(req.text)
+    if not text:
+        return {"error": "Empty text"}
 
-    kw = _keyword_stats(text)
-    se = _sentiment_block(text)
-    rd = _readability(text)
-    em = _emotion_stub(text)
-    th = _themes_stub(kw)
-    read_time = _read_time_minutes(words)
-    summary = _summary(text)
+    word_count = len(word_tokenize(text))
+    sentence_count = len(sent_tokenize(text))
+    sentiment = analyze_sentiment(text)
+    readability = calc_readability(text)
+    keywords = extract_keywords(text)
+    emotions = emotion_scores(text)
+    summary = generate_summary(text)
+    themes = find_themes(keywords)
 
-    preview_text = (text[:8000] + "…") if len(text) > 8000 else text
-
-    payload = {
-        "meta": {"filename": req.filename, "words": words, "read_time_min": read_time},
+    return {
+        "filename": req.filename,
+        "word_count": word_count,
+        "sentence_count": sentence_count,
+        "readability": readability,
+        "sentiment": sentiment,
+        "keywords": {"list": keywords},
+        "emotions": emotions,
         "summary": summary,
-        "readability": rd,
-        "keywords": {**kw, "previewText": preview_text},
-        "sentiment": se,
-        "emotions": em,
-        "themes": th,
-        "storage": {"persisted": False},
+        "themes": {"points": themes},
     }
-
-    return JSONResponse(payload)
-
-@app.post("/delete")
-async def delete_endpoint():
-    return JSONResponse({"ok": True, "server_deleted": False})
