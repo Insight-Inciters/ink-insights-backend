@@ -1,10 +1,19 @@
+// vercel.json
 {
   "version": 2,
   "builds": [
-    { "src": "./upload.py", "use": "@vercel/python" }
+    {
+      "src": "upload.py",
+      "use": "@vercel/python",
+      "config": {
+        "runtime": "python3.9"
+      }
+    }
   ],
   "routes": [
-    { "src": "/(.*)", "dest": "./upload.py" }
+    {
+      "src": "/(.*)",
+      "dest": "upload.py"
+    }
   ]
 }
-
