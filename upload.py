@@ -326,4 +326,4 @@ async def analyze_text(req: TextRequest):
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("upload:app", host="0.0.0.0", port=8000)
+    uvicorn.run("upload:app", host="0.0.0.0", port=10000)
