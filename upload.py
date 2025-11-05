@@ -6,16 +6,16 @@ from textblob import TextBlob
 from nltk.corpus import stopwords, wordnet as wn
 from nltk.tokenize import word_tokenize, sent_tokenize
 from nltk.stem import WordNetLemmatizer
-from collections import Counter
+from collections import Counter, defaultdict
 import nltk
 import numpy as np
 import re
-
+import os
 
 
 # ======= NLTK setup =======
 nltk.download("punkt", quiet=True)
-nltk.download("punkt_tab", quiet=True) 
+nltk.download("punkt_tab", quiet=True)
 nltk.download("stopwords", quiet=True)
 nltk.download("wordnet", quiet=True)
 nltk.download("omw-1.4", quiet=True)
@@ -49,13 +49,35 @@ def clean_text(text: str) -> str:
 
 
 def analyze_sentiment(text: str):
+    """Improved sentiment analyzer with pos/neg/neu percentages."""
     blob = TextBlob(text)
     polarity = blob.sentiment.polarity
     subjectivity = blob.sentiment.subjectivity
-    mood = "positive" if polarity > 0.1 else "negative" if polarity < -0.1 else "neutral"
+
+    # Split polarity into weighted positive / negative / neutral
+    positive = max(polarity, 0)
+    negative = max(-polarity, 0)
+    neutral = 1 - (positive + negative)
+    if neutral < 0:
+        neutral = 0.0
+
+    total = positive + negative + neutral or 1.0
+    pos_pct = round((positive / total) * 100, 2)
+    neg_pct = round((negative / total) * 100, 2)
+    neu_pct = round((neutral / total) * 100, 2)
+
+    mood = (
+        "positive" if pos_pct > neg_pct + 5
+        else "negative" if neg_pct > pos_pct + 5
+        else "neutral"
+    )
+
     return {
         "polarity": round(polarity, 3),
         "subjectivity": round(subjectivity, 3),
+        "positive": pos_pct,
+        "neutral": neu_pct,
+        "negative": neg_pct,
         "mood": mood,
     }
 
@@ -176,18 +198,14 @@ def _classical_mds(D: np.ndarray, dim: int = 2) -> np.ndarray:
     if n == 0:
         return np.zeros((0, dim))
 
-    # Centering matrix
     J = np.eye(n) - np.ones((n, n)) / n
-    # Double-centering formula
     B = -0.5 * J @ (D ** 2) @ J
 
-    # Eigen decomposition
     vals, vecs = np.linalg.eigh(B)
     idx = np.argsort(vals)[::-1]
     vals = vals[idx]
     vecs = vecs[:, idx]
 
-    # Keep only positive eigenvalues
     pos_mask = vals > 1e-9
     vals = vals[pos_mask][:dim]
     vecs = vecs[:, pos_mask][:, :dim]
@@ -195,17 +213,12 @@ def _classical_mds(D: np.ndarray, dim: int = 2) -> np.ndarray:
     if len(vals) == 0:
         return np.zeros((n, dim))
 
-    # Force vals to be 1D numeric array
     vals = np.array(vals, dtype=float).flatten()
-
-    # Scale coordinates
     try:
         X = vecs[:, :len(vals)] @ np.diag(np.sqrt(vals))
     except Exception:
-        # In case of mismatched shapes
         X = np.zeros((n, dim))
 
-    # Pad to ensure 2D (x,y)
     if X.ndim == 1:
         X = X.reshape(-1, 1)
     if X.shape[1] < dim:
@@ -213,40 +226,29 @@ def _classical_mds(D: np.ndarray, dim: int = 2) -> np.ndarray:
 
     return np.nan_to_num(X)
 
-def _greedy_clusters(points: np.ndarray, threshold: float = 0.3):
-    """
-    Simple greedy clustering of embedding vectors based on cosine similarity.
-    Returns a list of cluster labels (integers).
-    """
-    import numpy as np
-    from sklearn.metrics.pairwise import cosine_similarity
 
+def _greedy_clusters(points: np.ndarray, threshold: float = 0.3):
+    from sklearn.metrics.pairwise import cosine_similarity
     if points is None or len(points) == 0:
         return []
-
     sim = cosine_similarity(points)
     n = len(points)
     assigned = np.zeros(n, dtype=bool)
     clusters = [-1] * n
     cid = 0
-
     for i in range(n):
         if assigned[i]:
             continue
         clusters[i] = cid
         assigned[i] = True
-        # Assign all points that are sufficiently similar
         for j in range(i + 1, n):
             if not assigned[j] and sim[i, j] >= 1 - threshold:
                 clusters[j] = cid
                 assigned[j] = True
         cid += 1
-
-    # Safety: ensure list, not scalar
     if isinstance(clusters, int):
         clusters = [clusters]
     return clusters
-
 
 
 def find_themes(keywords, max_points=60):
@@ -273,7 +275,6 @@ def find_themes(keywords, max_points=60):
     clusters = _greedy_clusters(S, threshold=0.48)
     idx_to_cluster = {i: c for i, c in enumerate(clusters)}
 
-
     xs, ys = X[:, 0], X[:, 1]
     def _norm(arr):
         a, b = float(np.min(arr)), float(np.max(arr))
@@ -290,6 +291,30 @@ def find_themes(keywords, max_points=60):
             "count": counts[i],
         })
     return points
+
+
+def summarize_clusters(points):
+    """Group points by cluster and return averaged 3-word labels."""
+    clusters = defaultdict(list)
+    for p in points:
+        clusters[p["cluster"]].append(p)
+
+    summaries = []
+    for cid, pts in clusters.items():
+        pts_sorted = sorted(pts, key=lambda x: x["count"], reverse=True)
+        top_words = [p["label"] for p in pts_sorted[:3]]
+        label = " ".join(top_words) if top_words else f"Cluster {cid}"
+        xs = np.mean([p["x"] for p in pts])
+        ys = np.mean([p["y"] for p in pts])
+        total_count = sum(p["count"] for p in pts)
+        summaries.append({
+            "id": int(cid),
+            "label": label,
+            "x": round(float(xs), 4),
+            "y": round(float(ys), 4),
+            "count": int(total_count),
+        })
+    return summaries
 
 
 # ======= Routes =======
@@ -311,7 +336,8 @@ async def analyze_text(req: TextRequest):
     keywords = extract_keywords(text)
     emotions = emotion_scores(text)
     summary = generate_summary(text)
-    themes = find_themes(keywords)
+    themes_points = find_themes(keywords)
+    clusters = summarize_clusters(themes_points)
 
     return {
         "filename": req.filename,
@@ -322,12 +348,14 @@ async def analyze_text(req: TextRequest):
         "keywords": {"list": keywords},
         "emotions": emotions,
         "summary": summary,
-        "themes": {"points": themes},
+        "themes": {
+            "points": themes_points,
+            "clusters": clusters,
+        },
     }
 
 
 if __name__ == "__main__":
     import uvicorn
-    port = int(os.environ.get("PORT", 8000))  # ✅ works both locally & on Render
+    port = int(os.environ.get("PORT", 8000))
     uvicorn.run("upload:app", host="0.0.0.0", port=port)
-    
