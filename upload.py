@@ -45,33 +45,39 @@ def clean_text(text: str) -> str:
 
 
 def analyze_sentiment(text: str):
-    """Stable normalized sentiment calculation (always totals ~100%)."""
+    """Improved sentiment analysis with clearer neutral handling."""
     blob = TextBlob(text)
-    polarity = blob.sentiment.polarity
-    subjectivity = blob.sentiment.subjectivity
+    sentences = blob.sentences or [blob]
 
-    # Normalize to percentage scale
-    pos = max(0, polarity) * 100
-    neg = max(0, -polarity) * 100
-    neu = 100 - (pos + neg)
-    if neu < 0:
-        neu = 0.0
+    pos_sum, neg_sum = 0.0, 0.0
+    for sent in sentences:
+        p = sent.sentiment.polarity
+        if p > 0.05:
+            pos_sum += p
+        elif p < -0.05:
+            neg_sum += abs(p)
 
-    total = pos + neg + neu or 1.0
-    pos = (pos / total) * 100
-    neg = (neg / total) * 100
-    neu = (neu / total) * 100
+    # normalize to total sentences
+    n = max(len(sentences), 1)
+    pos = (pos_sum / n) * 100
+    neg = (neg_sum / n) * 100
+    pos = min(max(pos, 0), 100)
+    neg = min(max(neg, 0), 100)
+    neu = max(0.0, 100 - (pos + neg))
 
+    polarity = round(blob.sentiment.polarity, 3)
+    subjectivity = round(blob.sentiment.subjectivity, 3)
     mood = "positive" if polarity > 0.05 else "negative" if polarity < -0.05 else "neutral"
 
     return {
-        "polarity": round(polarity, 3),
-        "subjectivity": round(subjectivity, 3),
+        "polarity": polarity,
+        "subjectivity": subjectivity,
         "positive": round(pos, 2),
         "neutral": round(neu, 2),
         "negative": round(neg, 2),
         "mood": mood,
     }
+
 
 
 def count_syllables(word):
@@ -235,7 +241,7 @@ def find_themes(keywords, max_points=60):
 
     D = 1.0 - np.clip(S, 0.0, 1.0)
     X = _classical_mds(D, dim=2)
-    clusters = _greedy_clusters(S, threshold=0.48)
+    clusters = _greedy_clusters(X, threshold=0.35)
     idx_to_cluster = {i: c for i, c in enumerate(clusters)}
 
     xs, ys = X[:, 0], X[:, 1]
