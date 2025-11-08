@@ -1,31 +1,64 @@
-# upload.py
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from textblob import TextBlob
-from nltk.corpus import stopwords, wordnet as wn
+from nltk.corpus import stopwords
 from nltk.tokenize import word_tokenize, sent_tokenize
 from nltk.stem import WordNetLemmatizer
-from collections import Counter, defaultdict
+from collections import Counter
 import nltk
 import numpy as np
 import re
 import os
 import json
+from functools import lru_cache
+import threading
+import time
+
+# === New imports for semantic embeddings ===
+from gensim.downloader import load
+from sklearn.decomposition import PCA
+from sklearn.cluster import KMeans
 
 # ======= NLTK setup =======
-nltk.download("punkt", quiet=True)
-nltk.download("punkt_tab", quiet=True)
-nltk.download("stopwords", quiet=True)
-nltk.download("wordnet", quiet=True)
-nltk.download("omw-1.4", quiet=True)
+nltk.data.path.append(os.path.join(os.getcwd(), "nltk_data"))
+try:
+    nltk.data.find("tokenizers/punkt")
+    nltk.data.find("corpora/stopwords")
+    nltk.data.find("corpora/wordnet")
+except LookupError:
+    nltk.download("punkt")
+    nltk.download("stopwords")
+    nltk.download("wordnet")
+    nltk.download("omw-1.4")
+
+# ======= Cached GloVe load =======
+@lru_cache(maxsize=1)
+def get_glove_model():
+    print("🔄 Loading compact GloVe embeddings (first time only)...")
+    try:
+        model = load("glove-twitter-25")  # ⚡ Faster & smaller
+        print("✅ GloVe model loaded successfully.")
+        return model
+    except Exception as e:
+        print(f"⚠️ GloVe load failed: {e}")
+        return None
+
+_MODEL = get_glove_model()
 
 # ======= FastAPI setup =======
 app = FastAPI()
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["https://inkinsights.vercel.app"],
+    allow_origins=[
+        "http://127.0.0.1:5500",
+        "http://localhost:5500",
+        "http://127.0.0.1:5173",
+        "http://localhost:5173",
+        "https://inkinsights.vercel.app",
+        "https://ink-insights-backend.onrender.com",
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -36,6 +69,21 @@ class TextRequest(BaseModel):
     text: str
     filename: str = "document.txt"
 
+
+# ======= Progress tracking =======
+progress = {"status": "idle", "percent": 0, "message": ""}
+
+def update_progress(p, msg=""):
+    global progress
+    progress["percent"] = int(p)
+    progress["message"] = msg
+    progress["status"] = "running"
+
+@app.get("/progress")
+async def get_progress():
+    return progress
+
+
 # ======= Core helpers =======
 def clean_text(text: str) -> str:
     text = re.sub(r"http\S+", "", text)
@@ -44,30 +92,45 @@ def clean_text(text: str) -> str:
     return text.strip()
 
 
+# ======= Sentiment Analysis =======
 def analyze_sentiment(text: str):
-    """Improved sentiment analysis with clearer neutral handling."""
     blob = TextBlob(text)
     sentences = blob.sentences or [blob]
 
-    pos_sum, neg_sum = 0.0, 0.0
-    for sent in sentences:
-        p = sent.sentiment.polarity
-        if p > 0.05:
-            pos_sum += p
-        elif p < -0.05:
-            neg_sum += abs(p)
+    pos_sum, neg_sum, weight_sum = 0.0, 0.0, 0.0
+    negation_pattern = re.compile(r"\b(no|not|never|none|n't|hardly|rarely)\b", re.I)
 
-    # normalize to total sentences
-    n = max(len(sentences), 1)
+    for sent in sentences:
+        s_text = str(sent).lower()
+        p = sent.sentiment.polarity
+        w = max(1, len(s_text.split()) / 5)
+
+        if negation_pattern.search(s_text):
+            p = -p * 0.8
+
+        if p > 0.05:
+            pos_sum += p * w
+        elif p < -0.05:
+            neg_sum += abs(p) * w
+        weight_sum += w
+
+    n = max(weight_sum, 1)
     pos = (pos_sum / n) * 100
     neg = (neg_sum / n) * 100
-    pos = min(max(pos, 0), 100)
-    neg = min(max(neg, 0), 100)
+    pos = np.log1p(pos) * 20
+    neg = np.log1p(neg) * 20
+    pos, neg = min(pos, 100), min(neg, 100)
     neu = max(0.0, 100 - (pos + neg))
 
     polarity = round(blob.sentiment.polarity, 3)
     subjectivity = round(blob.sentiment.subjectivity, 3)
-    mood = "positive" if polarity > 0.05 else "negative" if polarity < -0.05 else "neutral"
+
+    if polarity > 0.1:
+        mood = "positive"
+    elif polarity < -0.1:
+        mood = "negative"
+    else:
+        mood = "neutral"
 
     return {
         "polarity": polarity,
@@ -77,7 +140,6 @@ def analyze_sentiment(text: str):
         "negative": round(neg, 2),
         "mood": mood,
     }
-
 
 
 def count_syllables(word):
@@ -105,20 +167,67 @@ def calc_readability(text: str):
 
 
 def extract_keywords(text: str, top_n=10):
-    words = word_tokenize(text.lower())
-    stop_words = set(stopwords.words("english"))
-    words = [w for w in words if w.isalpha() and w not in stop_words]
-    freq = Counter(words).most_common(top_n)
-    return [{"token": w, "count": c} for w, c in freq]
+    blob = TextBlob(text.lower())
+    words = [w for w in blob.words if w.isalpha() and w not in stopwords.words("english")]
+    if not words:
+        return []
+
+    freq = Counter(words)
+    for np in blob.noun_phrases:
+        tokens = np.split()
+        if len(tokens) > 1:
+            for word in tokens:
+                if word in freq:
+                    freq[word] += 2
+
+    if len(words) < 5:
+        for w in freq:
+            freq[w] = 1
+
+    return [{"token": w, "count": c} for w, c in freq.most_common(top_n)]
+
+
+def calculate_keyness(text: str, reference_text: str = None, top_n: int = 10):
+    tokens = [w.lower() for w in word_tokenize(text) if w.isalpha()]
+    if not tokens:
+        return []
+
+    freq_user = Counter(tokens)
+    if reference_text:
+        ref_tokens = [w.lower() for w in word_tokenize(reference_text) if w.isalpha()]
+    else:
+        ref_tokens = stopwords.words("english")
+    freq_ref = Counter(ref_tokens)
+
+    vocab = set(freq_user) | set(freq_ref)
+    total_user = sum(freq_user.values())
+    total_ref = sum(freq_ref.values())
+
+    keyness_scores = []
+    for word in vocab:
+        O1 = freq_user.get(word, 0)
+        O2 = freq_ref.get(word, 0)
+        E1 = total_user * (O1 + O2) / (total_user + total_ref + 1e-9)
+        E2 = total_ref * (O1 + O2) / (total_user + total_ref + 1e-9)
+
+        def ll(obs, exp):
+            return 0 if obs == 0 else obs * np.log(obs / exp)
+
+        llr = 2 * (ll(O1, E1) + ll(O2, E2))
+        keyness_scores.append((word, llr, O1))
+
+    top = sorted(keyness_scores, key=lambda x: x[1], reverse=True)[:top_n]
+    return [{"token": w, "keyness": round(k, 3), "count": c} for w, k, c in top]
 
 
 def emotion_scores(text: str):
     emotion_lex = {
-        "joy": ["happy", "joy", "delight", "love", "pleasure", "excited"],
-        "anger": ["angry", "mad", "furious", "rage", "irritated"],
-        "sadness": ["sad", "down", "depressed", "cry", "lonely"],
-        "fear": ["fear", "scared", "terrified", "afraid", "nervous"],
+        "anger": ["angry", "mad", "furious", "rage", "irritated", "annoyed"],
+        "sadness": ["sad", "down", "depressed", "lonely", "unhappy", "tearful"],
+        "fear": ["fear", "scared", "terrified", "afraid", "nervous", "worried"],
+        "joy": ["happy", "joy", "delight", "love", "pleasure", "excited", "glad"],
         "surprise": ["surprised", "shocked", "amazed", "astonished"],
+        "disgust": ["disgusted", "repulsed", "gross", "sickened", "vile"],
     }
     tokens = [w.lower() for w in word_tokenize(text)]
     emo_counts = {k: 0 for k in emotion_lex}
@@ -132,159 +241,65 @@ def emotion_scores(text: str):
 
 def generate_summary(text: str):
     sentences = sent_tokenize(text)
-    if len(sentences) <= 3:
+    if len(sentences) <= 4:
         return " ".join(sentences)
     ranked = sorted(sentences, key=lambda s: abs(TextBlob(s).sentiment.polarity), reverse=True)
-    return " ".join(ranked[:3]).strip()
+    return " ".join(ranked[:4]).strip()
 
-# ======= Semantic clustering helpers =======
-_LEMM = WordNetLemmatizer()
 
-def _normalize_token(t: str) -> str:
-    t = re.sub(r"[^a-zA-Z']", "", t.lower())
-    if not t:
-        return t
-    lemmas = [
-        _LEMM.lemmatize(t, "n"),
-        _LEMM.lemmatize(t, "v"),
-        _LEMM.lemmatize(t, "a"),
-        _LEMM.lemmatize(t, "r"),
+def find_themes(text: str, max_words=150):
+    model = _MODEL
+    if not model:
+        return [], []
+
+    tokens = [w.lower() for w in word_tokenize(text) if w.isalpha() and w not in stopwords.words("english")]
+    unique_tokens = list(dict.fromkeys(tokens))[:max_words]
+
+    vectors, kept = [], []
+    for w in unique_tokens:
+        if w in model:
+            vectors.append(model[w])
+            kept.append(w)
+
+    if not vectors:
+        return [], []
+
+    X = np.array(vectors)
+    pca = PCA(n_components=2, random_state=42)
+    coords = pca.fit_transform(X)
+
+    n_clusters = max(2, min(6, len(kept) // 10))
+    km = KMeans(n_clusters=n_clusters, n_init=5, random_state=42)
+    labels = km.fit_predict(X)
+
+    points = [
+        {"x": float(coords[i, 0]), "y": float(coords[i, 1]), "label": kept[i],
+         "cluster": int(labels[i]), "count": tokens.count(kept[i])}
+        for i in range(len(kept))
     ]
-    return min(lemmas, key=len)
 
-
-def _wordnet_similarity(a: str, b: str) -> float:
-    if a == b or not a or not b:
-        return 1.0 if a == b and a else 0.0
-    syn_a, syn_b = wn.synsets(a), wn.synsets(b)
-    best = 0.0
-    for sa in syn_a:
-        for sb in syn_b:
-            sim = sa.wup_similarity(sb)
-            if sim and sim > best:
-                best = sim
-    return float(best or 0.0)
-
-
-def _char_bigrams(s: str) -> set:
-    return {s[i:i+2] for i in range(len(s)-1)} if len(s) > 1 else {s}
-
-
-def _jaccard_chars(a: str, b: str) -> float:
-    A, B = _char_bigrams(a), _char_bigrams(b)
-    return len(A & B) / max(1, len(A | B)) if A or B else 0.0
-
-
-def _semantic_similarity(a: str, b: str) -> float:
-    wn_sim = _wordnet_similarity(a, b)
-    return wn_sim if wn_sim >= 0.2 else max(wn_sim, _jaccard_chars(a, b))
-
-
-def _classical_mds(D: np.ndarray, dim: int = 2) -> np.ndarray:
-    n = D.shape[0]
-    if n == 0:
-        return np.zeros((0, dim))
-    J = np.eye(n) - np.ones((n, n)) / n
-    B = -0.5 * J @ (D ** 2) @ J
-    vals, vecs = np.linalg.eigh(B)
-    idx = np.argsort(vals)[::-1]
-    vals, vecs = vals[idx], vecs[:, idx]
-    pos_mask = vals > 1e-9
-    vals, vecs = vals[pos_mask][:dim], vecs[:, pos_mask][:, :dim]
-    if len(vals) == 0:
-        return np.zeros((n, dim))
-    X = vecs[:, :len(vals)] @ np.diag(np.sqrt(vals))
-    if X.ndim == 1:
-        X = X.reshape(-1, 1)
-    if X.shape[1] < dim:
-        X = np.pad(X, ((0, 0), (0, dim - X.shape[1])), mode="constant")
-    return np.nan_to_num(X)
-
-
-def _greedy_clusters(points: np.ndarray, threshold: float = 0.3):
-    from sklearn.metrics.pairwise import cosine_similarity
-    if points is None or len(points) == 0:
-        return []
-    sim = cosine_similarity(points)
-    n = len(points)
-    assigned = np.zeros(n, dtype=bool)
-    clusters = [-1] * n
-    cid = 0
-    for i in range(n):
-        if assigned[i]:
-            continue
-        clusters[i] = cid
-        assigned[i] = True
-        for j in range(i + 1, n):
-            if not assigned[j] and sim[i, j] >= 1 - threshold:
-                clusters[j] = cid
-                assigned[j] = True
-        cid += 1
-    return clusters
-
-
-def find_themes(keywords, max_points=60):
-    kw = keywords[:max_points]
-    if not kw:
-        return []
-    tokens = [_normalize_token(k["token"]) for k in kw]
-    counts = [int(k["count"]) for k in kw]
-    labels = [k["token"] for k in kw]
-
-    n = len(tokens)
-    S = np.zeros((n, n), dtype=float)
-    for i in range(n):
-        S[i, i] = 1.0
-        for j in range(i + 1, n):
-            sim = _semantic_similarity(tokens[i], tokens[j])
-            S[i, j] = S[j, i] = sim
-
-    D = 1.0 - np.clip(S, 0.0, 1.0)
-    X = _classical_mds(D, dim=2)
-    clusters = _greedy_clusters(X, threshold=0.35)
-    idx_to_cluster = {i: c for i, c in enumerate(clusters)}
-
-    xs, ys = X[:, 0], X[:, 1]
-    def _norm(arr):
-        a, b = float(np.min(arr)), float(np.max(arr))
-        return (arr - a) / (b - a + 1e-9)
-    xs_n, ys_n = _norm(xs), _norm(ys)
-
-    return [{
-        "x": round(float(xs_n[i]), 4),
-        "y": round(float(ys_n[i]), 4),
-        "label": labels[i],
-        "cluster": int(idx_to_cluster.get(i, 0)),
-        "count": counts[i],
-    } for i in range(n)]
-
-
-def summarize_clusters(points):
-    """Return averaged clusters with simple label + total weight."""
-    if not points:
-        return []
-    clusters = defaultdict(list)
-    for p in points:
-        clusters[p["cluster"]].append(p)
-
-    summaries = []
-    for cid, pts in clusters.items():
-        pts_sorted = sorted(pts, key=lambda x: x["count"], reverse=True)
-        top_words = [p["label"] for p in pts_sorted[:3]]
-        label = " ".join(top_words) if top_words else f"Cluster {cid + 1}"
-        xs = np.mean([p["x"] for p in pts])
-        ys = np.mean([p["y"] for p in pts])
-        total_count = sum(p["count"] for p in pts)
-        summaries.append({
-            "id": int(cid),
-            "label": label,
-            "x": round(float(xs), 4),
-            "y": round(float(ys), 4),
-            "count": int(total_count),
+    clusters = []
+    for cid in range(n_clusters):
+        cluster_words = [p["label"] for p in points if p["cluster"] == cid]
+        clusters.append({
+            "id": cid,
+            "label": ", ".join(cluster_words[:10]),
+            "count": len(cluster_words),
+            "x": float(np.mean([p["x"] for p in points if p["cluster"] == cid])),
+            "y": float(np.mean([p["y"] for p in points if p["cluster"] == cid])),
         })
-    return summaries
 
-# ======= Routes =======
+    # Normalize
+    xs = [p["x"] for p in points]
+    ys = [p["y"] for p in points]
+    norm = lambda arr: [(v - min(arr)) / (max(arr) - min(arr) + 1e-9) for v in arr]
+    for i, p in enumerate(points):
+        p["x"] = round(norm(xs)[i], 4)
+        p["y"] = round(norm(ys)[i], 4)
+
+    return points, clusters
+
+
 @app.get("/")
 async def home():
     return {"message": "Ink Insights backend is working!"}
@@ -292,19 +307,37 @@ async def home():
 
 @app.post("/analyze")
 async def analyze_text(req: TextRequest):
+    global progress
+    progress = {"status": "running", "percent": 0, "message": "Starting analysis"}
+
     text = clean_text(req.text)
     if not text:
+        progress = {"status": "error", "message": "Empty text"}
         return {"error": "Empty text"}
+
+    update_progress(10, "Analyzing sentiment")
+    sentiment = analyze_sentiment(text)
+
+    update_progress(25, "Extracting emotions")
+    emotions = emotion_scores(text)
+
+    update_progress(40, "Extracting keywords")
+    keywords = extract_keywords(text)
+
+    update_progress(55, "Computing keyness")
+    keyness = calculate_keyness(text)
+
+    update_progress(70, "Clustering semantic themes")
+    themes_points, clusters = find_themes(text)
+
+    update_progress(90, "Finalizing summary")
+    readability = calc_readability(text)
+    summary = generate_summary(text)
 
     word_count = len(word_tokenize(text))
     sentence_count = len(sent_tokenize(text))
-    sentiment = analyze_sentiment(text)
-    readability = calc_readability(text)
-    keywords = extract_keywords(text)
-    emotions = emotion_scores(text)
-    summary = generate_summary(text)
-    themes_points = find_themes(keywords)
-    clusters = summarize_clusters(themes_points)
+    emotion_tone = emotions["breakdown"].get("joy", 0) - emotions["breakdown"].get("sadness", 0)
+    blended_tone = round(0.7 * (sentiment["positive"] - sentiment["negative"]) + 0.3 * (emotion_tone * 100), 2)
 
     data = {
         "filename": req.filename,
@@ -312,24 +345,24 @@ async def analyze_text(req: TextRequest):
         "sentence_count": sentence_count,
         "readability": readability,
         "sentiment": sentiment,
+        "blended_tone": blended_tone,
         "keywords": {"list": keywords},
+        "keyness": {"list": keyness},
         "emotions": emotions,
         "summary": summary,
-        "themes": {
-            "points": themes_points,
-            "clusters": clusters or [],
-        },
+        "themes": {"points": themes_points, "clusters": clusters or []},
     }
 
-    # Optional: Save last result for debugging
     try:
         with open("last_report.json", "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
     except Exception:
         pass
 
-    return data
+    update_progress(100, "Analysis complete")
+    progress["status"] = "done"
 
+    return data
 
 if __name__ == "__main__":
     import uvicorn
