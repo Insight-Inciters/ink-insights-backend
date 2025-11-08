@@ -1,6 +1,7 @@
-fastapi
-uvicorn
-textblob
-nltk
-numpy
-scikit-learn
+fastapi==0.121.0
+uvicorn[standard]==0.38.0
+textblob==0.19.0
+nltk==3.9.2
+numpy==2.3.4
+scikit-learn==1.7.2
+gensim==4.3.3
