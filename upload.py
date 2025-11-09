@@ -34,24 +34,32 @@ import shutil, os
 _MODEL = None
 
 def get_glove_model():
-    """Load the lightweight 25D Twitter GloVe model lazily and safely for Render."""
+    """Load the lightweight 25D Twitter GloVe model safely for Render."""
     global _MODEL
     if _MODEL is None:
         print("🔄 Loading GloVe Twitter 25D embeddings (small + fast)...")
         try:
             from gensim.downloader import load
 
-            # --- Render fix: cleanup leftover tmp folder ---
-            tmp_path = "/opt/render/gensim-data/glove-twitter-25_tmp"
-            if os.path.exists(tmp_path) and os.path.isdir(tmp_path):
-                print("🧹 Cleaning up old temporary GloVe folder...")
-                shutil.rmtree(tmp_path, ignore_errors=True)
+            # --- Ensure gensim-data directory exists ---
+            base_path = "/opt/render/gensim-data"
+            os.makedirs(base_path, exist_ok=True)
 
+            # --- Remove any leftover or corrupted tmp folders ---
+            for item in os.listdir(base_path):
+                if item.startswith("glove-twitter-25") and item.endswith("_tmp"):
+                    tmp_path = os.path.join(base_path, item)
+                    print(f"🧹 Removing leftover temp folder: {tmp_path}")
+                    shutil.rmtree(tmp_path, ignore_errors=True)
+
+            # --- Now safely load the model ---
             _MODEL = load("glove-twitter-25")
             print("✅ GloVe model loaded successfully (glove-twitter-25).")
+
         except Exception as e:
             print(f"⚠️ Warning: Failed to load GloVe embeddings: {e}")
             _MODEL = None
+
     return _MODEL
 
 
