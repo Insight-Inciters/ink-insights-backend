@@ -5,3 +5,6 @@ nltk
 numpy
 scikit-learn
 gensim
+smart-open
+
+
