@@ -31,19 +31,29 @@ nltk.download("words", quiet=True)
 # ======= Lazy GloVe loader =======
 _MODEL = None
 
+import shutil, os
+
 def get_glove_model():
-    """Load the 100-dimensional Twitter GloVe model lazily (fast + accurate)."""
+    """Load the 100D Twitter GloVe model lazily (with Render-safe cleanup)."""
     global _MODEL
     if _MODEL is None:
         print("🔄 Loading GloVe Twitter 100D embeddings (first time only)...")
         try:
             from gensim.downloader import load
-            _MODEL = load("glove-twitter-100")   # <<-- your chosen model
+
+            # --- Render fix: cleanup stale temp directory ---
+            tmp_path = "/opt/render/gensim-data/glove-twitter-100_tmp"
+            if os.path.exists(tmp_path) and os.path.isdir(tmp_path):
+                print("🧹 Cleaning up old temporary GloVe folder...")
+                shutil.rmtree(tmp_path, ignore_errors=True)
+
+            _MODEL = load("glove-twitter-100")
             print("✅ GloVe model loaded successfully (glove-twitter-100).")
         except Exception as e:
             print(f"⚠️ Warning: Failed to load GloVe embeddings: {e}")
             _MODEL = None
     return _MODEL
+
 
 
 # ======= FastAPI setup =======
