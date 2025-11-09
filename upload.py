@@ -11,9 +11,6 @@ import numpy as np
 import re
 import os
 import json
-from functools import lru_cache
-import threading
-import time
 
 # === New imports for semantic embeddings ===
 from gensim.downloader import load
@@ -21,30 +18,19 @@ from sklearn.decomposition import PCA
 from sklearn.cluster import KMeans
 
 # ======= NLTK setup =======
-nltk.data.path.append(os.path.join(os.getcwd(), "nltk_data"))
+nltk.download("punkt", quiet=True)
+nltk.download("stopwords", quiet=True)
+nltk.download("wordnet", quiet=True)
+nltk.download("omw-1.4", quiet=True)
+
+# ======= Load GloVe model =======
+print("🔄 Loading GloVe 300D embeddings (first time may take a few seconds)...")
 try:
-    nltk.data.find("tokenizers/punkt")
-    nltk.data.find("corpora/stopwords")
-    nltk.data.find("corpora/wordnet")
-except LookupError:
-    nltk.download("punkt")
-    nltk.download("stopwords")
-    nltk.download("wordnet")
-    nltk.download("omw-1.4")
-
-# ======= Cached GloVe load =======
-@lru_cache(maxsize=1)
-def get_glove_model():
-    print("🔄 Loading compact GloVe embeddings (first time only)...")
-    try:
-        model = load("glove-twitter-25")  # ⚡ Faster & smaller
-        print("✅ GloVe model loaded successfully.")
-        return model
-    except Exception as e:
-        print(f"⚠️ GloVe load failed: {e}")
-        return None
-
-_MODEL = get_glove_model()
+    _MODEL = load("glove-wiki-gigaword-300")
+    print("✅ GloVe model loaded successfully.")
+except Exception as e:
+    print(f"⚠️ Warning: Failed to load GloVe embeddings: {e}")
+    _MODEL = None
 
 # ======= FastAPI setup =======
 app = FastAPI()
@@ -70,20 +56,6 @@ class TextRequest(BaseModel):
     filename: str = "document.txt"
 
 
-# ======= Progress tracking =======
-progress = {"status": "idle", "percent": 0, "message": ""}
-
-def update_progress(p, msg=""):
-    global progress
-    progress["percent"] = int(p)
-    progress["message"] = msg
-    progress["status"] = "running"
-
-@app.get("/progress")
-async def get_progress():
-    return progress
-
-
 # ======= Core helpers =======
 def clean_text(text: str) -> str:
     text = re.sub(r"http\S+", "", text)
@@ -92,8 +64,9 @@ def clean_text(text: str) -> str:
     return text.strip()
 
 
-# ======= Sentiment Analysis =======
+# ======= Improved Sentiment Analysis =======
 def analyze_sentiment(text: str):
+    """Enhanced sentiment analysis with negation handling and smoothing."""
     blob = TextBlob(text)
     sentences = blob.sentences or [blob]
 
@@ -103,8 +76,9 @@ def analyze_sentiment(text: str):
     for sent in sentences:
         s_text = str(sent).lower()
         p = sent.sentiment.polarity
-        w = max(1, len(s_text.split()) / 5)
+        w = max(1, len(s_text.split()) / 5)  # longer sentences carry more weight
 
+        # Negation handling: flip polarity slightly
         if negation_pattern.search(s_text):
             p = -p * 0.8
 
@@ -114,9 +88,12 @@ def analyze_sentiment(text: str):
             neg_sum += abs(p) * w
         weight_sum += w
 
+    # Normalize weighted sentiment values
     n = max(weight_sum, 1)
     pos = (pos_sum / n) * 100
     neg = (neg_sum / n) * 100
+
+    # Smooth spikes
     pos = np.log1p(pos) * 20
     neg = np.log1p(neg) * 20
     pos, neg = min(pos, 100), min(neg, 100)
@@ -125,6 +102,7 @@ def analyze_sentiment(text: str):
     polarity = round(blob.sentiment.polarity, 3)
     subjectivity = round(blob.sentiment.subjectivity, 3)
 
+    # Adjusted thresholds for more natural feel
     if polarity > 0.1:
         mood = "positive"
     elif polarity < -0.1:
@@ -167,12 +145,15 @@ def calc_readability(text: str):
 
 
 def extract_keywords(text: str, top_n=10):
+    """Extract key tokens with balanced weighting for noun phrases."""
     blob = TextBlob(text.lower())
     words = [w for w in blob.words if w.isalpha() and w not in stopwords.words("english")]
     if not words:
         return []
 
     freq = Counter(words)
+
+    # ✅ Only boost multi-word noun phrases to avoid inflating single words
     for np in blob.noun_phrases:
         tokens = np.split()
         if len(tokens) > 1:
@@ -180,6 +161,7 @@ def extract_keywords(text: str, top_n=10):
                 if word in freq:
                     freq[word] += 2
 
+    # ✅ Prevent false inflation for very short texts
     if len(words) < 5:
         for w in freq:
             freq[w] = 1
@@ -187,6 +169,7 @@ def extract_keywords(text: str, top_n=10):
     return [{"token": w, "count": c} for w, c in freq.most_common(top_n)]
 
 
+# ======= Keyness Analysis =======
 def calculate_keyness(text: str, reference_text: str = None, top_n: int = 10):
     tokens = [w.lower() for w in word_tokenize(text) if w.isalpha()]
     if not tokens:
@@ -220,14 +203,15 @@ def calculate_keyness(text: str, reference_text: str = None, top_n: int = 10):
     return [{"token": w, "keyness": round(k, 3), "count": c} for w, k, c in top]
 
 
+# ======= Emotion Scoring =======
 def emotion_scores(text: str):
     emotion_lex = {
-        "anger": ["angry", "mad", "furious", "rage", "irritated", "annoyed"],
-        "sadness": ["sad", "down", "depressed", "lonely", "unhappy", "tearful"],
-        "fear": ["fear", "scared", "terrified", "afraid", "nervous", "worried"],
-        "joy": ["happy", "joy", "delight", "love", "pleasure", "excited", "glad"],
-        "surprise": ["surprised", "shocked", "amazed", "astonished"],
-        "disgust": ["disgusted", "repulsed", "gross", "sickened", "vile"],
+        "anger": ["angry", "mad", "furious", "rage", "irritated", "annoyed", "resentful", "offended"],
+        "sadness": ["sad", "down", "depressed", "cry", "lonely", "unhappy", "tearful", "heartbroken"],
+        "fear": ["fear", "scared", "terrified", "afraid", "nervous", "worried", "anxious", "panicked"],
+        "joy": ["happy", "joy", "delight", "love", "pleasure", "excited", "smile", "grateful", "glad"],
+        "surprise": ["surprised", "shocked", "amazed", "astonished", "startled", "unexpected"],
+        "disgust": ["disgusted", "repulsed", "gross", "nauseated", "sickened", "offended", "vile"],
     }
     tokens = [w.lower() for w in word_tokenize(text)]
     emo_counts = {k: 0 for k in emotion_lex}
@@ -247,18 +231,18 @@ def generate_summary(text: str):
     return " ".join(ranked[:4]).strip()
 
 
-def find_themes(text: str, max_words=150):
-    model = _MODEL
-    if not model:
+# ======= Semantic Clustering =======
+def find_themes(text: str, max_words=500):
+    if not _MODEL:
         return [], []
 
-    tokens = [w.lower() for w in word_tokenize(text) if w.isalpha() and w not in stopwords.words("english")]
+    tokens = [w.lower() for w in word_tokenize(text) if w.isalpha() and w.lower() not in stopwords.words("english")]
     unique_tokens = list(dict.fromkeys(tokens))[:max_words]
 
     vectors, kept = [], []
     for w in unique_tokens:
-        if w in model:
-            vectors.append(model[w])
+        if w in _MODEL:
+            vectors.append(_MODEL[w])
             kept.append(w)
 
     if not vectors:
@@ -269,7 +253,7 @@ def find_themes(text: str, max_words=150):
     coords = pca.fit_transform(X)
 
     n_clusters = max(2, min(6, len(kept) // 10))
-    km = KMeans(n_clusters=n_clusters, n_init=5, random_state=42)
+    km = KMeans(n_clusters=n_clusters, n_init=10, random_state=42)
     labels = km.fit_predict(X)
 
     points = [
@@ -289,10 +273,10 @@ def find_themes(text: str, max_words=150):
             "y": float(np.mean([p["y"] for p in points if p["cluster"] == cid])),
         })
 
-    # Normalize
     xs = [p["x"] for p in points]
     ys = [p["y"] for p in points]
     norm = lambda arr: [(v - min(arr)) / (max(arr) - min(arr) + 1e-9) for v in arr]
+
     for i, p in enumerate(points):
         p["x"] = round(norm(xs)[i], 4)
         p["y"] = round(norm(ys)[i], 4)
@@ -300,6 +284,7 @@ def find_themes(text: str, max_words=150):
     return points, clusters
 
 
+# ======= Routes =======
 @app.get("/")
 async def home():
     return {"message": "Ink Insights backend is working!"}
@@ -307,35 +292,21 @@ async def home():
 
 @app.post("/analyze")
 async def analyze_text(req: TextRequest):
-    global progress
-    progress = {"status": "running", "percent": 0, "message": "Starting analysis"}
-
     text = clean_text(req.text)
     if not text:
-        progress = {"status": "error", "message": "Empty text"}
         return {"error": "Empty text"}
-
-    update_progress(10, "Analyzing sentiment")
-    sentiment = analyze_sentiment(text)
-
-    update_progress(25, "Extracting emotions")
-    emotions = emotion_scores(text)
-
-    update_progress(40, "Extracting keywords")
-    keywords = extract_keywords(text)
-
-    update_progress(55, "Computing keyness")
-    keyness = calculate_keyness(text)
-
-    update_progress(70, "Clustering semantic themes")
-    themes_points, clusters = find_themes(text)
-
-    update_progress(90, "Finalizing summary")
-    readability = calc_readability(text)
-    summary = generate_summary(text)
 
     word_count = len(word_tokenize(text))
     sentence_count = len(sent_tokenize(text))
+    sentiment = analyze_sentiment(text)
+    emotions = emotion_scores(text)
+    readability = calc_readability(text)
+    keywords = extract_keywords(text)
+    keyness = calculate_keyness(text)
+    summary = generate_summary(text)
+    themes_points, clusters = find_themes(text)
+
+    # Blend sentiment + emotion joy/sadness for smoother tone
     emotion_tone = emotions["breakdown"].get("joy", 0) - emotions["breakdown"].get("sadness", 0)
     blended_tone = round(0.7 * (sentiment["positive"] - sentiment["negative"]) + 0.3 * (emotion_tone * 100), 2)
 
@@ -359,10 +330,8 @@ async def analyze_text(req: TextRequest):
     except Exception:
         pass
 
-    update_progress(100, "Analysis complete")
-    progress["status"] = "done"
-
     return data
+
 
 if __name__ == "__main__":
     import uvicorn
