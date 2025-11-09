@@ -32,18 +32,19 @@ nltk.download("words", quiet=True)
 _MODEL = None
 
 def get_glove_model():
-    """Load GloVe model only when needed (avoids Render timeout)."""
+    """Load the 100-dimensional Twitter GloVe model lazily (fast + accurate)."""
     global _MODEL
     if _MODEL is None:
-        print("🔄 Loading GloVe 300D embeddings (first time may take a few seconds)...")
+        print("🔄 Loading GloVe Twitter 100D embeddings (first time only)...")
         try:
             from gensim.downloader import load
-            _MODEL = load("glove-wiki-gigaword-300")
-            print("✅ GloVe model loaded successfully.")
+            _MODEL = load("glove-twitter-100")   # <<-- your chosen model
+            print("✅ GloVe model loaded successfully (glove-twitter-100).")
         except Exception as e:
             print(f"⚠️ Warning: Failed to load GloVe embeddings: {e}")
             _MODEL = None
     return _MODEL
+
 
 # ======= FastAPI setup =======
 app = FastAPI()
@@ -322,6 +323,10 @@ async def analyze_text(req: TextRequest):
         pass
 
     return data
+
+# Preload GloVe model once at startup (optional)
+import threading
+threading.Thread(target=get_glove_model, daemon=True).start()
 
 
 if __name__ == "__main__":
