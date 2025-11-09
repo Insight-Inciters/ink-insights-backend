@@ -12,8 +12,7 @@ import re
 import os
 import json
 
-# === New imports for semantic embeddings ===
-from gensim.downloader import load
+# === Semantic embeddings (lazy-loaded later) ===
 from sklearn.decomposition import PCA
 from sklearn.cluster import KMeans
 
@@ -23,14 +22,22 @@ nltk.download("stopwords", quiet=True)
 nltk.download("wordnet", quiet=True)
 nltk.download("omw-1.4", quiet=True)
 
-# ======= Load GloVe model =======
-print("🔄 Loading GloVe 300D embeddings (first time may take a few seconds)...")
-try:
-    _MODEL = load("glove-wiki-gigaword-300")
-    print("✅ GloVe model loaded successfully.")
-except Exception as e:
-    print(f"⚠️ Warning: Failed to load GloVe embeddings: {e}")
-    _MODEL = None
+# ======= Lazy GloVe loader =======
+_MODEL = None
+
+def get_glove_model():
+    """Load GloVe model only when needed (avoids Render timeout)."""
+    global _MODEL
+    if _MODEL is None:
+        print("🔄 Loading GloVe 300D embeddings (first time may take a few seconds)...")
+        try:
+            from gensim.downloader import load
+            _MODEL = load("glove-wiki-gigaword-300")
+            print("✅ GloVe model loaded successfully.")
+        except Exception as e:
+            print(f"⚠️ Warning: Failed to load GloVe embeddings: {e}")
+            _MODEL = None
+    return _MODEL
 
 # ======= FastAPI setup =======
 app = FastAPI()
@@ -78,7 +85,6 @@ def analyze_sentiment(text: str):
         p = sent.sentiment.polarity
         w = max(1, len(s_text.split()) / 5)  # longer sentences carry more weight
 
-        # Negation handling: flip polarity slightly
         if negation_pattern.search(s_text):
             p = -p * 0.8
 
@@ -88,12 +94,10 @@ def analyze_sentiment(text: str):
             neg_sum += abs(p) * w
         weight_sum += w
 
-    # Normalize weighted sentiment values
     n = max(weight_sum, 1)
     pos = (pos_sum / n) * 100
     neg = (neg_sum / n) * 100
 
-    # Smooth spikes
     pos = np.log1p(pos) * 20
     neg = np.log1p(neg) * 20
     pos, neg = min(pos, 100), min(neg, 100)
@@ -102,7 +106,6 @@ def analyze_sentiment(text: str):
     polarity = round(blob.sentiment.polarity, 3)
     subjectivity = round(blob.sentiment.subjectivity, 3)
 
-    # Adjusted thresholds for more natural feel
     if polarity > 0.1:
         mood = "positive"
     elif polarity < -0.1:
@@ -145,43 +148,33 @@ def calc_readability(text: str):
 
 
 def extract_keywords(text: str, top_n=10):
-    """Extract key tokens with balanced weighting for noun phrases."""
     blob = TextBlob(text.lower())
     words = [w for w in blob.words if w.isalpha() and w not in stopwords.words("english")]
     if not words:
         return []
-
     freq = Counter(words)
-
-    # ✅ Only boost multi-word noun phrases to avoid inflating single words
     for np in blob.noun_phrases:
         tokens = np.split()
         if len(tokens) > 1:
             for word in tokens:
                 if word in freq:
                     freq[word] += 2
-
-    # ✅ Prevent false inflation for very short texts
     if len(words) < 5:
         for w in freq:
             freq[w] = 1
-
     return [{"token": w, "count": c} for w, c in freq.most_common(top_n)]
 
 
-# ======= Keyness Analysis =======
 def calculate_keyness(text: str, reference_text: str = None, top_n: int = 10):
     tokens = [w.lower() for w in word_tokenize(text) if w.isalpha()]
     if not tokens:
         return []
-
     freq_user = Counter(tokens)
     if reference_text:
         ref_tokens = [w.lower() for w in word_tokenize(reference_text) if w.isalpha()]
     else:
         ref_tokens = stopwords.words("english")
     freq_ref = Counter(ref_tokens)
-
     vocab = set(freq_user) | set(freq_ref)
     total_user = sum(freq_user.values())
     total_ref = sum(freq_ref.values())
@@ -198,12 +191,10 @@ def calculate_keyness(text: str, reference_text: str = None, top_n: int = 10):
 
         llr = 2 * (ll(O1, E1) + ll(O2, E2))
         keyness_scores.append((word, llr, O1))
-
     top = sorted(keyness_scores, key=lambda x: x[1], reverse=True)[:top_n]
     return [{"token": w, "keyness": round(k, 3), "count": c} for w, k, c in top]
 
 
-# ======= Emotion Scoring =======
 def emotion_scores(text: str):
     emotion_lex = {
         "anger": ["angry", "mad", "furious", "rage", "irritated", "annoyed", "resentful", "offended"],
@@ -231,20 +222,18 @@ def generate_summary(text: str):
     return " ".join(ranked[:4]).strip()
 
 
-# ======= Semantic Clustering =======
 def find_themes(text: str, max_words=500):
-    if not _MODEL:
+    model = get_glove_model()
+    if not model:
         return [], []
 
     tokens = [w.lower() for w in word_tokenize(text) if w.isalpha() and w.lower() not in stopwords.words("english")]
     unique_tokens = list(dict.fromkeys(tokens))[:max_words]
-
     vectors, kept = [], []
     for w in unique_tokens:
-        if w in _MODEL:
-            vectors.append(_MODEL[w])
+        if w in model:
+            vectors.append(model[w])
             kept.append(w)
-
     if not vectors:
         return [], []
 
@@ -261,7 +250,6 @@ def find_themes(text: str, max_words=500):
          "cluster": int(labels[i]), "count": tokens.count(kept[i])}
         for i in range(len(kept))
     ]
-
     clusters = []
     for cid in range(n_clusters):
         cluster_words = [p["label"] for p in points if p["cluster"] == cid]
@@ -276,11 +264,9 @@ def find_themes(text: str, max_words=500):
     xs = [p["x"] for p in points]
     ys = [p["y"] for p in points]
     norm = lambda arr: [(v - min(arr)) / (max(arr) - min(arr) + 1e-9) for v in arr]
-
     for i, p in enumerate(points):
         p["x"] = round(norm(xs)[i], 4)
         p["y"] = round(norm(ys)[i], 4)
-
     return points, clusters
 
 
@@ -306,7 +292,6 @@ async def analyze_text(req: TextRequest):
     summary = generate_summary(text)
     themes_points, clusters = find_themes(text)
 
-    # Blend sentiment + emotion joy/sadness for smoother tone
     emotion_tone = emotions["breakdown"].get("joy", 0) - emotions["breakdown"].get("sadness", 0)
     blended_tone = round(0.7 * (sentiment["positive"] - sentiment["negative"]) + 0.3 * (emotion_tone * 100), 2)
 
@@ -332,10 +317,9 @@ async def analyze_text(req: TextRequest):
 
     return data
 
-if __name__ == "__main__":
-    import uvicorn, os
 
+if __name__ == "__main__":
+    import uvicorn
     port = int(os.environ.get("PORT", 8000))
     print(f"🚀 Starting FastAPI server on port {port} ...")
     uvicorn.run("upload:app", host="0.0.0.0", port=port, reload=False)
-
