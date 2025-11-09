@@ -332,9 +332,10 @@ async def analyze_text(req: TextRequest):
 
     return data
 
-
 if __name__ == "__main__":
-    import uvicorn
+    import uvicorn, os
+
     port = int(os.environ.get("PORT", 8000))
-    uvicorn.run("upload:app", host="0.0.0.0", port=port)
+    print(f"🚀 Starting FastAPI server on port {port} ...")
+    uvicorn.run("upload:app", host="0.0.0.0", port=port, reload=False)
 
