@@ -241,17 +241,32 @@ def generate_summary(text: str):
 
 
 def find_themes(text: str, max_words=500):
+    global _MODEL
     model = get_glove_model()
-    if not model:
-        return [], []
-
-    tokens = [w.lower() for w in word_tokenize(text) if w.isalpha() and w.lower() not in stopwords.words("english")]
+    
+    # Wait until model is fully loaded (up to 10 seconds)
+    if model is None:
+        import time
+        print("⏳ Waiting for GloVe to load...")
+        for _ in range(20):  # try for ~10 seconds
+            time.sleep(0.5)
+            model = get_glove_model()
+            if model:
+                break
+        if model is None:
+            print("⚠️ GloVe still not ready, skipping themes.")
+            return [], []
+    
+    tokens = [w.lower() for w in word_tokenize(text)
+              if w.isalpha() and w.lower() not in stopwords.words("english")]
     unique_tokens = list(dict.fromkeys(tokens))[:max_words]
+
     vectors, kept = [], []
     for w in unique_tokens:
         if w in model:
             vectors.append(model[w])
             kept.append(w)
+
     if not vectors:
         return [], []
 
@@ -264,10 +279,12 @@ def find_themes(text: str, max_words=500):
     labels = km.fit_predict(X)
 
     points = [
-        {"x": float(coords[i, 0]), "y": float(coords[i, 1]), "label": kept[i],
-         "cluster": int(labels[i]), "count": tokens.count(kept[i])}
+        {"x": float(coords[i, 0]), "y": float(coords[i, 1]),
+         "label": kept[i], "cluster": int(labels[i]),
+         "count": tokens.count(kept[i])}
         for i in range(len(kept))
     ]
+
     clusters = []
     for cid in range(n_clusters):
         cluster_words = [p["label"] for p in points if p["cluster"] == cid]
@@ -285,7 +302,9 @@ def find_themes(text: str, max_words=500):
     for i, p in enumerate(points):
         p["x"] = round(norm(xs)[i], 4)
         p["y"] = round(norm(ys)[i], 4)
+
     return points, clusters
+
 
 
 # ======= Routes =======
