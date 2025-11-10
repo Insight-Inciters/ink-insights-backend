@@ -28,24 +28,22 @@ _MODEL = None
 _MODE_NAME = "none"
 
 # === Safe lightweight GloVe loader ===
-from gensim.models import KeyedVectors
-
 def get_glove_model():
-    """Load pre-saved mini GloVe from local file (Render-safe)."""
     global _MODEL, _MODE_NAME
     if _MODEL is not None:
         return _MODEL
     try:
-        path = os.path.join(os.path.dirname(__file__), "glove-mini.kv")
-        print("🔄 Loading local mini GloVe …")
+        path = os.path.join(os.path.dirname(__file__), "glove-mini-100.kv")
+        print("🔄 Loading local mini GloVe 100 …")
         _MODEL = KeyedVectors.load(path, mmap="r")
-        _MODE_NAME = "Mini-GloVe"
-        print("✅ Mini GloVe loaded successfully.")
+        _MODE_NAME = "Mini-GloVe 100D"
+        print("✅ Mini GloVe 100D loaded successfully.")
     except Exception as e:
-        print(f"⚠️ Could not load mini GloVe: {e}")
+        print(f"⚠️ Could not load GloVe 100D: {e}")
         _MODEL = None
         _MODE_NAME = "TFIDF"
     return _MODEL
+
 
 
 # === Fallback: TF-IDF Embedding ===
