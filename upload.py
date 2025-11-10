@@ -11,6 +11,8 @@ import re, os, json, tempfile, threading
 from sklearn.decomposition import PCA
 from sklearn.cluster import KMeans
 from sklearn.feature_extraction.text import TfidfVectorizer
+from gensim.models import KeyedVectors
+
 
 # ======= NLTK setup ======= 
 nltk.download("punkt", quiet=True) 
