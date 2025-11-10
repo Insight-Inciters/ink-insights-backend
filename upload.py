@@ -22,31 +22,34 @@ nltk.download("punkt_tab", quiet=True)
 nltk.download("stopwords", quiet=True)
 nltk.download("wordnet", quiet=True)
 nltk.download("omw-1.4", quiet=True)
-nltk.download("brown", quiet=True)
-nltk.download("averaged_perceptron_tagger", quiet=True)
-nltk.download("maxent_ne_chunker", quiet=True)
-nltk.download("words", quiet=True)
 
 
 # ======= Lazy GloVe loader =======
-import numpy as np
-from gensim.models import KeyedVectors
+import tempfile
+import gensim.downloader as api
 
 _MODEL = None
 
 def get_glove_model():
+    """Load the 50D GloVe model safely for low-memory Render instances."""
     global _MODEL
-    if _MODEL is None:
-        print("🧠 Using lightweight dummy GloVe (no download).")
-        kv = KeyedVectors(vector_size=25)
-        # You can add frequent tokens to make similarity tests work
-        kv.add_vector("good", np.random.rand(25))
-        kv.add_vector("bad", np.random.rand(25))
-        kv.add_vector("happy", np.random.rand(25))
-        kv.add_vector("sad", np.random.rand(25))
-        _MODEL = kv
-    return _MODEL
+    if _MODEL is not None:
+        return _MODEL
 
+    print("🔄 Loading compact GloVe Twitter 25D (Render-safe)...")
+    try:
+        # Use temp directory instead of /opt/render
+        api.BASE_DIR = os.path.join(tempfile.gettempdir(), "gensim-data")
+        os.makedirs(api.BASE_DIR, exist_ok=True)
+
+
+        # Load a smaller model to avoid OOM
+        _MODEL = api.load("glove-twitter-25")
+        print("✅ GloVe loaded successfully.")
+    except Exception as e:
+        print(f"⚠️ Failed to load GloVe: {e}")
+        _MODEL = None
+    return _MODEL
 
 
 # ======= FastAPI setup =======
@@ -326,10 +329,6 @@ async def analyze_text(req: TextRequest):
         pass
 
     return data
-
-# Preload GloVe model once at startup (optional)
-import threading
-threading.Thread(target=get_glove_model, daemon=True).start()
 
 
 if __name__ == "__main__":
