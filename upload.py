@@ -12,37 +12,41 @@ from sklearn.decomposition import PCA
 from sklearn.cluster import KMeans
 from sklearn.feature_extraction.text import TfidfVectorizer
 
-# === NLTK setup ===
-nltk.download("punkt", quiet=True)
-nltk.download("stopwords", quiet=True)
-nltk.download("wordnet", quiet=True)
-nltk.download("omw-1.4", quiet=True)
+# ======= NLTK setup ======= 
+nltk.download("punkt", quiet=True) 
+nltk.download("punkt_tab", quiet=True) 
+nltk.download("stopwords", quiet=True) 
+nltk.download("wordnet", quiet=True) 
+nltk.download("omw-1.4", quiet=True) 
+nltk.download("brown", quiet=True) 
+nltk.download("averaged_perceptron_tagger", quiet=True) 
+nltk.download("maxent_ne_chunker", quiet=True) 
+nltk.download("words", quiet=True)
 
 # === Globals ===
 _MODEL = None
 _MODE_NAME = "none"
 
 # === Safe lightweight GloVe loader ===
+from gensim.models import KeyedVectors
+
 def get_glove_model():
-    """Try to load small GloVe; fallback to None if memory too low."""
+    """Load pre-saved mini GloVe from local file (Render-safe)."""
     global _MODEL, _MODE_NAME
     if _MODEL is not None:
         return _MODEL
-
     try:
-        import gensim.downloader as api
-        api.BASE_DIR = os.path.join(tempfile.gettempdir(), "gensim-data")
-        os.makedirs(api.BASE_DIR, exist_ok=True)
-
-        print("🔄 Loading GloVe Twitter 25D (Render-safe)...")
-        _MODEL = api.load("glove-twitter-25", return_path=False)
-        _MODE_NAME = "GloVe"
-        print("✅ GloVe loaded successfully (25D).")
+        path = os.path.join(os.path.dirname(__file__), "glove-mini.kv")
+        print("🔄 Loading local mini GloVe …")
+        _MODEL = KeyedVectors.load(path, mmap="r")
+        _MODE_NAME = "Mini-GloVe"
+        print("✅ Mini GloVe loaded successfully.")
     except Exception as e:
-        print(f"⚠️ GloVe load failed: {e}")
+        print(f"⚠️ Could not load mini GloVe: {e}")
         _MODEL = None
         _MODE_NAME = "TFIDF"
     return _MODEL
+
 
 # === Fallback: TF-IDF Embedding ===
 def tfidf_embeddings(tokens):
