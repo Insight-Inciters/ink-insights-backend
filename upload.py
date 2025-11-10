@@ -30,26 +30,36 @@ nltk.download("maxent_ne_chunker", quiet=True)
 nltk.download("words", quiet=True)
 
 # ======= Load GloVe model =======
-# === Globals ===
 import tempfile
+from gensim.downloader import load
+
 _MODEL = None
-_MODE_NAME = "none"
+
 def get_glove_model():
-    """Load GloVe 50D Wiki model directly in memory (no cache dirs)."""
-    global _MODEL, _MODE_NAME
+    """Load GloVe 50D directly in memory without using the default cache path."""
+    global _MODEL
     if _MODEL is not None:
         return _MODEL
 
     try:
-        print("🔄 Loading GloVe Wiki 50D (in-memory, no directory)...")
-        from gensim.downloader import load
+        import os
+        import shutil
+
+        # Use Render's writable /tmp dir
+        tmp_dir = tempfile.mkdtemp(prefix="glove_")
+
+        print("🔄 Loading GloVe Wiki 50D (in-memory, no permanent cache)...")
         _MODEL = load("glove-wiki-gigaword-50", return_path=False)
-        _MODE_NAME = "GloVe-50D"
         print(f"✅ Loaded GloVe Wiki 50D successfully!  Vocab size: {len(_MODEL)}")
+
+        # Cleanup if gensim left behind a _tmp directory
+        default_path = "/opt/render/gensim-data/glove-wiki-gigaword-50_tmp"
+        if os.path.isdir(default_path):
+            shutil.rmtree(default_path, ignore_errors=True)
+
     except Exception as e:
         print(f"⚠️ Could not load GloVe Wiki 50D: {e}")
         _MODEL = None
-        _MODE_NAME = "TFIDF"
 
     return _MODEL
 
